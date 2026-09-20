@@ -137,12 +137,6 @@ Windows:
 .venv\\Scripts\\activate
 ```
 
-Linux/macOS:
-
-```bash
-source .venv/bin/activate
-```
-
 После этого:
 
 ```bash
