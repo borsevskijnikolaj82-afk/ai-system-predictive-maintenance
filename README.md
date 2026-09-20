@@ -1,81 +1,74 @@
-# AI System — Predictive Maintenance
+# Лабораторная работа №2 — Predictive Maintenance
 
-Лабораторная работа №2: проектирование архитектуры программной AI-системы для предиктивного обслуживания оборудования.
+Небольшой учебный сервис для предиктивного обслуживания оборудования. Сервис принимает несколько показателей оборудования и возвращает оценку риска. Основной сценарий — оператор отправляет данные, получает результат и при необходимости передаёт оборудование на ручную проверку.
 
-## 1. Контекст и бизнес-проблема
+## Что сделано
 
-Система предназначена для анализа телеметрии оборудования (температура, вибрация, наработка, код последней ошибки) и выдачи прогноза риска аварийного состояния. Потребитель результата — оператор/диспетчер и внешняя корпоративная система.
+В проекте есть четыре основных части:
 
-Бизнес-цель: сократить число аварийных простоев за счёт раннего выявления аномалий и передачи оператору признака необходимости ручной проверки.
+- API на FastAPI;
+- проверка входных данных через Pydantic;
+- отдельные модули для подготовки признаков и расчёта результата;
+- простое хранение результатов и технические метрики.
 
-## 2. Границы и требования
+Проект собран как модульный монолит. Все части запускаются в одном приложении.
 
-**Входит:** валидация входных данных, предобработка, инференс, бизнес-правила, API, логирование, локальное хранение фактов инференса, мониторинг.
+## Границы системы
 
-**Не входит:** физическое управление станками, бухгалтерские операции, юридическое утверждение приказов.
+Сервис отвечает за приём телеметрии, проверку данных, расчёт прогноза, применение простого бизнес-правила и сохранение результата.
 
-### Метрики
-- Бизнес: снижение аварийных простоев.
-- SLA: инференс одного объекта на CPU ≤ 150 мс.
-- Качество модели: precision/recall/F1; для конкретной обученной модели значения должны быть зафиксированы после валидации.
-- Воспроизводимость: `request_id`, `model_version` в каждом ответе.
+В проект не входит управление оборудованием, бухгалтерия и автоматическое принятие производственных решений.
 
-## 3. Архитектурный стиль
+### Используемые показатели
 
-Выбран **модульный монолит** в одном Docker-контейнере на FastAPI. Такой стиль соответствует учебному заданию: внутренние модули разделены явными контрактами, при этом отсутствуют лишние сетевые задержки и упрощаются локальная отладка и тестирование.
+Для примера используются:
 
-## 4. System Context — Mermaid
+- температура;
+- амплитуда вибрации;
+- наработка в часах;
+- количество ошибок за последние 24 часа.
+
+Для ответа сохраняются `request_id` и `model_version`.
+
+## Архитектура
+
+Использован модульный монолит. Для учебной работы это проще, чем сразу разносить API, модель и хранение по разным сервисам.
 
 ```mermaid
 flowchart LR
-  User[Оператор / Пользователь] -->|HTTPS: запрос / данные| System[AI-система Predictive Maintenance]
-  System -->|JSON: прогноз + вероятность| User
-  System -->|Чтение профиля / истории| CorpDB[(Корпоративная БД / ERP)]
-  System -->|Алерты при критических сбоях| AlertSystem[Telegram / Email]
-  System -.->|Экспорт задержек и ошибок| Monitoring[Prometheus]
+    User[Оператор] --> API[FastAPI]
+    API --> Service[PredictionService]
+    Service --> Preprocess[Preprocessing]
+    Preprocess --> Model[ModelLoader]
+    Service --> Repo[PredictionRepository]
+    API --> Metrics[/metrics/]
 ```
 
-## 5. Component Diagram — Mermaid
+Основной путь запроса:
 
-```mermaid
-flowchart TB
-  Client[Внешний клиент / Web-интерфейс] -->|HTTP POST /api/v1/predict| API[FastAPI Gateway]
-  subgraph AppContainer[Контейнер приложения]
-    API --> Auth[API-Key Authentication]
-    Auth --> Validator[Pydantic Validator]
-    Validator --> Preprocessing[Feature Preprocessing]
-    Preprocessing --> InferenceEngine[Model Inference Engine]
-    InferenceEngine --> BusinessLogic[Business Logic]
-  end
-  subgraph ArtifactStore[Хранилище моделей]
-    InferenceEngine -.->|загрузка версии модели| ModelFile[(Model Storage / MLflow / S3)]
-  end
-  subgraph DataStore[Persistence]
-    BusinessLogic -->|факт прогноза + метаданные| AppDB[(SQLite / PostgreSQL)]
-  end
-  subgraph Observability[Observability]
-    API -.->|HTTP metrics| MetricsEndpoint[/metrics/]
-    BusinessLogic -.->|JSON logs| LogsOutput[JSON Logger]
-  end
-  BusinessLogic -->|HTTP 200 JSON| Client
+```text
+POST /api/v1/predict
+        ↓
+   проверка API key
+        ↓
+     Pydantic
+        ↓
+   preprocessing
+        ↓
+      модель
+        ↓
+ бизнес-правило
+        ↓
+ сохранение результата
+        ↓
+      JSON
 ```
 
-## 6. Потоки данных
-
-| Поток | Протокол | Формат | Частота |
-|---|---|---|---|
-| Клиент → `/predict` | HTTPS/REST | JSON | По запросу |
-| API → БД | SQL/SQLAlchemy | реляционные записи | На каждый успешный инференс |
-| Inference → Model Storage | файловый/S3/MLflow API | модельный артефакт | При загрузке/смене версии |
-| API → Prometheus | HTTP scrape | OpenMetrics | Периодически |
-| Business Logic → Logger | stdout/file | JSON | На каждый запрос |
-| Система → уведомления | HTTPS | JSON/text | При критическом событии |
-
-## 7. REST API
+## API
 
 ### `POST /api/v1/predict`
 
-Headers: `Content-Type: application/json`, `X-API-Key: <secret_token>`.
+Нужен заголовок `X-API-Key`.
 
 Пример запроса:
 
@@ -93,7 +86,7 @@ Headers: `Content-Type: application/json`, `X-API-Key: <secret_token>`.
 
 ```json
 {
-  "request_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "request_id": "...",
   "item_id": "PUMP_UNIT_42",
   "prediction": "WARNING_ANOMALY",
   "probability": 0.84,
@@ -102,80 +95,91 @@ Headers: `Content-Type: application/json`, `X-API-Key: <secret_token>`.
 }
 ```
 
-Ошибки валидации: HTTP 400/422 с указанием поля и причины.
-
 ### `GET /health`
 
-Возвращает статус сервиса, состояние загрузки модели, версию модели и uptime.
+Показывает состояние приложения и загружена ли модель.
 
 ### `GET /metrics`
 
-Prometheus/OpenMetrics endpoint.
+Отдаёт метрики Prometheus.
 
-## 8. Компоненты
-
-| Компонент | Назначение | Вход | Выход |
-|---|---|---|---|
-| `app.api.routes` | HTTP-обработка | HTTP request | HTTP response |
-| `app.api.schemas` | Pydantic-валидация | JSON | типизированная модель |
-| `app.ml.preprocessing` | трансформация признаков | dict | numpy array |
-| `app.ml.inference` | инференс | признаки | prediction + probability |
-| `app.services.prediction` | бизнес-правила/fallback | запрос + вердикт | бизнес-результат |
-| `app.repositories` | персистентность | prediction entity | запись в БД |
-
-## 9. ADR
-
-- [ADR-01: Синхронный REST inference](docs/adr/ADR-01-inference-mode.md)
-- [ADR-02: Версионирование моделей](docs/adr/ADR-02-model-artifacts.md)
-- [ADR-03: Модульный монолит](docs/adr/ADR-03-architecture-style.md)
-
-## 10. Безопасность и наблюдаемость
-
-- Аутентификация: `X-API-Key`.
-- Payload size limit: до 2 МБ.
-- Тайм-ауты запросов.
-- Персональные данные не передаются в незашифрованном виде; идентификаторы маскируются перед инференсом.
-- JSON-логи с `timestamp`, `request_id`, `item_id`, `latency_ms`, `status`, `prediction`, `model_version`.
-- Prometheus: `http_requests_total`, `http_request_duration_seconds`, `model_inference_duration_seconds`.
-- Drift: периодический offline-анализ распределений признаков с KS/PSI через Evidently.
-
-## 11. Train-Serving Skew
-
-Предобработка оформлена отдельным версионируемым модулем. В промышленной эксплуатации один и тот же артефакт трансформаций должен использоваться в обучении и serving, чтобы не допустить расхождения логики признаков.
-
-## 12. Структура репозитория
+## Структура проекта
 
 ```text
 ai-system-predictive-maintenance/
-├── .gitignore
-├── LICENSE
-├── README.md
-├── requirements.txt
-├── Dockerfile
 ├── app/
-│   ├── api/
-│   ├── core/
-│   ├── data/
-│   ├── ml/
-│   ├── services/
-│   └── repositories/
+│   ├── api/              # HTTP и схемы запросов
+│   ├── core/             # настройка логирования
+│   ├── data/             # задел под данные
+│   ├── ml/               # preprocessing и модель
+│   ├── repositories/     # хранение результатов
+│   └── services/         # основная логика
 ├── docs/
 │   ├── architecture.md
 │   └── adr/
-└── tests/
+├── tests/
+├── Dockerfile
+├── requirements.txt
+└── README.md
 ```
 
-## 13. Запуск
+## Запуск в PyCharm
+
+В терминале проекта:
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
+```
+
+Windows:
+
+```bash
+.venv\\Scripts\\activate
+```
+
+Linux/macOS:
+
+```bash
+source .venv/bin/activate
+```
+
+После этого:
+
+```bash
 pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
-Swagger: `http://localhost:8000/docs`.
+Документация API будет доступна по адресу `http://127.0.0.1:8000/docs`.
 
-## 14. Ограничения учебного прототипа
+Для тестов:
 
-В репозитории нет бинарных весов модели. `ModelLoader` реализован как безопасная заглушка; реальный артефакт модели должен храниться вне Git (S3/MinIO/MLflow/DVC).
+```bash
+pytest -q
+```
+
+## Docker
+
+Собрать образ:
+
+```bash
+docker build -t predictive-maintenance .
+```
+
+Запустить:
+
+```bash
+docker run -p 8000:8000 predictive-maintenance
+```
+
+## ADR
+
+- [ADR-01 — способ вызова модели](docs/adr/ADR-01-inference-mode.md)
+- [ADR-02 — хранение модели](docs/adr/ADR-02-model-artifacts.md)
+- [ADR-03 — архитектурный стиль](docs/adr/ADR-03-architecture-style.md)
+
+## Что осталось упрощённым
+
+В проекте нет настоящего обученного файла модели. `ModelLoader` содержит небольшой расчёт риска и нужен именно для демонстрации места, где в реальном проекте выполнялся бы инференс.
+
+Хранилище результатов сейчас работает в памяти. Для реального сервиса его можно заменить на PostgreSQL или другое постоянное хранилище.
